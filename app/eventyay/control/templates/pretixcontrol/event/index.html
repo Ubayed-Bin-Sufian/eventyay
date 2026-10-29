@@ -15,9 +15,7 @@
 {% endblock %}
 {% block body_class %}dashboard-print{% endblock %}
 {% block content %}
-    {# Section 1 (issue #5088): modern page header -- "Tickets dashboard" title with the
-       event name and date range beneath it. The meetup / event-series / normal-event
-       branches and the component_link navigation are preserved. #}
+    {# Modern dashboard header: 'Tickets dashboard' title with event name and date range. #}
     {% if is_meetup_event %}
         {% trans 'Meetup' as date_text %}
     {% elif request.event.has_subevents %}

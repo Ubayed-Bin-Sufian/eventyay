@@ -93,6 +93,14 @@ def test_header_preserves_component_link_navigation(client, env):
     assert f'href="{tickets_url}"' in content
     assert 'navigation-button' in content
 
+    # The Tickets entry must carry the "active" class on its anchor.
+    tickets_anchor = re.search(
+        r'<a[^>]*href="' + re.escape(tickets_url) + r'"[^>]*>', content
+    )
+    assert tickets_anchor is not None, 'Tickets navigation anchor not found'
+    anchor_tag = tickets_anchor.group(0)
+    assert 'active' in anchor_tag
+
 
 @pytest.mark.django_db
 @override_settings(SITE_URL='https://testserver')

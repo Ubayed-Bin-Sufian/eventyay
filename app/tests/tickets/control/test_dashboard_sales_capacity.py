@@ -48,15 +48,18 @@ def env():
         )
         team_no_perm.members.add(user_no_perm)
 
+    # Product/Quota are organizer-scoped, so create event-owned data under an
+    # active tenant scope rather than scopes_disabled().
+    with scope(organizer=organizer, event=event):
         product = Product.objects.create(event=event, name='Ticket', default_price=25, admission=True, active=True)
 
-        return {
-            'organizer': organizer,
-            'event': event,
-            'user_with_perm': user_with_perm,
-            'user_no_perm': user_no_perm,
-            'product': product,
-        }
+    return {
+        'organizer': organizer,
+        'event': event,
+        'user_with_perm': user_with_perm,
+        'user_no_perm': user_no_perm,
+        'product': product,
+    }
 
 
 def _dashboard_url(env, subevent=None):
@@ -222,7 +225,7 @@ def test_sales_unlimited_capacity(client, env):
 def test_sales_total_row(client, env):
     _make_quota(env, 'A', 10, [env['product']])
     bprod = None
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         bprod = Product.objects.create(event=env['event'], name='B ticket', default_price=5, admission=True)
     _make_quota(env, 'B', 20, [bprod])
     _make_order(env, Order.STATUS_PAID, env['product'], n=2)
@@ -275,7 +278,7 @@ def test_sales_totals_distinct_across_overlapping_quotas(client, env):
 def test_sales_totals_exclude_out_of_quota_variations(client, env):
     # A quota restricted to one variation must not make the totals count
     # positions of the product's other variations.
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         shirt = Product.objects.create(event=env['event'], name='Shirt', default_price=20, admission=True)
         v_small = shirt.variations.create(value='Small')
         v_large = shirt.variations.create(value='Large')
@@ -332,7 +335,7 @@ def test_sales_links_match_counts(client, env):
         'control:event.orders',
         kwargs={'organizer': env['organizer'].slug, 'event': env['event'].slug},
     )
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         quota_pk = env['event'].quotas.first().pk
     quota_url = reverse(
         'control:event.products.quotas.show',
@@ -349,7 +352,7 @@ def test_sales_links_match_counts(client, env):
 @pytest.mark.django_db
 @override_settings(SITE_URL='https://testserver')
 def test_sales_multi_product_quota_links_to_quota_detail(client, env):
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         second = Product.objects.create(event=env['event'], name='Second', default_price=5, admission=True)
     _make_quota(env, 'Combo', 10, [env['product'], second])
 
@@ -357,7 +360,7 @@ def test_sales_multi_product_quota_links_to_quota_detail(client, env):
     response = client.get(_dashboard_url(env))
     sc = response.context['sales_capacity']
     row = next(r for r in sc['rows'] if r['name'] == 'Combo')
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         quota_pk = env['event'].quotas.first().pk
     quota_url = reverse(
         'control:event.products.quotas.show',
@@ -374,7 +377,7 @@ def test_sales_variation_product_names(client, env):
     # A product with variations is listed via its variations, not as a bare
     # product name. This exercises the variation_count path (no per-product
     # has_variations query).
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=env['event']):
         varprod = Product.objects.create(event=env['event'], name='Shirt', default_price=20, admission=True)
         v_s = varprod.variations.create(value='Small')
         v_l = varprod.variations.create(value='Large')
@@ -433,7 +436,7 @@ def test_sales_subevent_filtering(client, env):
     # The event-level quota counts only null-subevent positions, which an order
     # list filtered by the selected date cannot express, so its counts link to
     # the quota detail instead (avoids a count-vs-destination mismatch).
-    with scopes_disabled():
+    with scope(organizer=env['organizer'], event=event):
         qall_pk = event.quotas.get(name='Q all dates').pk
     quota_detail = reverse(
         'control:event.products.quotas.show',

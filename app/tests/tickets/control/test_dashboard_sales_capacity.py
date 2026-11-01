@@ -272,6 +272,31 @@ def test_sales_totals_distinct_across_overlapping_quotas(client, env):
 
 @pytest.mark.django_db
 @override_settings(SITE_URL='https://testserver')
+def test_sales_totals_exclude_out_of_quota_variations(client, env):
+    # A quota restricted to one variation must not make the totals count
+    # positions of the product's other variations.
+    with scopes_disabled():
+        shirt = Product.objects.create(event=env['event'], name='Shirt', default_price=20, admission=True)
+        v_small = shirt.variations.create(value='Small')
+        v_large = shirt.variations.create(value='Large')
+    with scope(organizer=env['organizer'], event=env['event']):
+        q = env['event'].quotas.create(name='Small shirts', size=10)
+        q.variations.add(v_small)  # quota covers ONLY the Small variation
+        # One paid Small position (in quota) and one paid Large position (NOT).
+        o = Order.objects.create(
+            event=env['event'], status=Order.STATUS_PAID, datetime=now(), expires=now(), total=40, code='SHIRT1'
+        )
+        OrderPosition.objects.create(order=o, product=shirt, variation=v_small, price=20)
+        OrderPosition.objects.create(order=o, product=shirt, variation=v_large, price=20)
+
+    client.force_login(env['user_with_perm'])
+    sc = client.get(_dashboard_url(env)).context['sales_capacity']
+    # Only the Small position counts; the Large position is outside the quota.
+    assert sc['totals']['paid'] == 1
+
+
+@pytest.mark.django_db
+@override_settings(SITE_URL='https://testserver')
 def test_sales_total_row_unlimited_footer(client, env):
     # Capacity/remaining totals are not summable -> rendered as a dash, never
     # as 0 or a bogus number, even when a quota is unlimited.
@@ -405,8 +430,17 @@ def test_sales_subevent_filtering(client, env):
     day1_row = next(r for r in sc1['rows'] if r['name'] == 'Q day1')
     allrow = next(r for r in sc1['rows'] if r['name'] == 'Q all dates')
     assert f'subevent={se1.pk}' in day1_row['paid_url']
-    assert 'subevent=' not in allrow['paid_url']
-    assert 'subevent=' not in allrow['ordered_url']
+    # The event-level quota counts only null-subevent positions, which an order
+    # list filtered by the selected date cannot express, so its counts link to
+    # the quota detail instead (avoids a count-vs-destination mismatch).
+    with scopes_disabled():
+        qall_pk = event.quotas.get(name='Q all dates').pk
+    quota_detail = reverse(
+        'control:event.products.quotas.show',
+        kwargs={'organizer': env['organizer'].slug, 'event': event.slug, 'quota': qall_pk},
+    )
+    assert allrow['paid_url'] == quota_detail
+    assert allrow['ordered_url'] == quota_detail
 
 
 @pytest.mark.django_db

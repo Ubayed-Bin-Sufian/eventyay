@@ -231,28 +231,65 @@ def test_sales_total_row(client, env):
     client.force_login(env['user_with_perm'])
     response = client.get(_dashboard_url(env))
     sc = response.context['sales_capacity']
+    # Totals over distinct positions: 2 + 4 paid across non-overlapping quotas.
     assert sc['totals']['paid'] == 6
     assert sc['totals']['ordered'] == 6
-    assert sc['totals']['capacity'] == 30
-    assert sc['totals']['remaining'] == 24  # (10-2) + (20-4)
+    assert sc['totals']['pending'] == 0
+    # Capacity/remaining cannot be summed across overlapping quotas -> omitted.
+    assert sc['totals']['capacity'] == 'n/a'
+    assert sc['totals']['remaining'] == 'n/a'
 
     tfoot = _tfoot(_sales_section(response.content.decode()))
     assert '<strong>6</strong>' in tfoot   # ordered + paid totals both 6
-    assert '<strong>30</strong>' in tfoot  # capacity
-    assert '<strong>24</strong>' in tfoot  # remaining
+    assert '&mdash;' in tfoot               # capacity/remaining shown as dash
 
 
 @pytest.mark.django_db
 @override_settings(SITE_URL='https://testserver')
-def test_sales_total_row_unlimited(client, env):
-    # When any quota is unlimited, the capacity/remaining totals are unlimited.
-    _make_quota(env, 'Limited', 10, [env['product']])
-    _make_quota(env, 'Infinite', None, [env['product']])
+def test_sales_totals_distinct_across_overlapping_quotas(client, env):
+    # A product in two quotas must not be counted twice in the totals, even
+    # though each quota row shows the full count for that product.
+    _make_quota(env, 'All event', 100, [env['product']])
+    _make_quota(env, 'VIP block', 10, [env['product']])
+    _make_order(env, Order.STATUS_PAID, env['product'], n=3)
+    _make_order(env, Order.STATUS_PENDING, env['product'], n=1)
 
     client.force_login(env['user_with_perm'])
-    sc = client.get(_dashboard_url(env)).context['sales_capacity']
-    assert sc['totals']['capacity'] is None
-    assert sc['totals']['remaining'] is None
+    response = client.get(_dashboard_url(env))
+    sc = response.context['sales_capacity']
+
+    # Each row shows the product's full counts (3 paid, 1 pending).
+    for name in ('All event', 'VIP block'):
+        row = next(r for r in sc['rows'] if r['name'] == name)
+        assert row['paid'] == 3
+        assert row['pending'] == 1
+
+    # But the totals count DISTINCT positions, not 3+3 / 1+1.
+    assert sc['totals']['paid'] == 3
+    assert sc['totals']['pending'] == 1
+    assert sc['totals']['ordered'] == 4
+
+
+@pytest.mark.django_db
+@override_settings(SITE_URL='https://testserver')
+def test_sales_total_row_unlimited_footer(client, env):
+    # Capacity/remaining totals are not summable -> rendered as a dash, never
+    # as 0 or a bogus number, even when a quota is unlimited.
+    _make_quota(env, 'Limited', 10, [env['product']])
+    _make_quota(env, 'Infinite', None, [env['product']])
+    _make_order(env, Order.STATUS_PAID, env['product'], n=2)
+
+    client.force_login(env['user_with_perm'])
+    response = client.get(_dashboard_url(env))
+    sc = response.context['sales_capacity']
+    assert sc['totals']['capacity'] == 'n/a'
+    assert sc['totals']['remaining'] == 'n/a'
+    assert sc['totals']['paid'] == 2  # distinct positions, not doubled
+
+    tfoot = _tfoot(_sales_section(response.content.decode()))
+    # Capacity/remaining render as a dash (not a number, not infinity).
+    assert tfoot.count('&mdash;') == 2
+    assert '&infin;' not in tfoot
 
 
 @pytest.mark.django_db
@@ -362,6 +399,15 @@ def test_sales_subevent_filtering(client, env):
     assert names1 == {'Q day1', 'Q all dates'}
     assert 'Q day2' not in names1
 
+    # The date-specific quota's links carry the selected date; the event-level
+    # quota's links must NOT (it counts null-subevent positions that a
+    # date-filtered order list would exclude).
+    day1_row = next(r for r in sc1['rows'] if r['name'] == 'Q day1')
+    allrow = next(r for r in sc1['rows'] if r['name'] == 'Q all dates')
+    assert f'subevent={se1.pk}' in day1_row['paid_url']
+    assert 'subevent=' not in allrow['paid_url']
+    assert 'subevent=' not in allrow['ordered_url']
+
 
 @pytest.mark.django_db
 @override_settings(SITE_URL='https://testserver')
@@ -383,5 +429,5 @@ def test_sales_empty_state(client, env):
     sc = response.context['sales_capacity']
     assert sc['has_quotas'] is False
     section = _sales_section(response.content.decode())
-    assert 'No products or quotas have been set up yet.' in section
+    assert 'No quotas have been set up yet.' in section
     assert '<table' not in section

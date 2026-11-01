@@ -53,18 +53,14 @@
             <td class="td-st-count"><strong>{{ sales_capacity.totals.ordered }}</strong></td>
             <td class="td-st-count"><strong>{{ sales_capacity.totals.paid }}</strong></td>
             <td class="td-st-count"><strong>{{ sales_capacity.totals.pending }}</strong></td>
-            <td class="td-st-count">
-              <strong>{% if sales_capacity.totals.remaining == None %}<span aria-label="{% trans 'Unlimited' %}">&infin;</span>{% else %}{{ sales_capacity.totals.remaining }}{% endif %}</strong>
-            </td>
-            <td class="td-st-count">
-              <strong>{% if sales_capacity.totals.capacity == None %}<span aria-label="{% trans 'Unlimited' %}">&infin;</span>{% else %}{{ sales_capacity.totals.capacity }}{% endif %}</strong>
-            </td>
+            <td class="td-st-count"><span class="td-muted" aria-label="{% trans 'Not applicable' %}">&mdash;</span></td>
+            <td class="td-st-count"><span class="td-muted" aria-label="{% trans 'Not applicable' %}">&mdash;</span></td>
             <td></td>
           </tr>
         </tfoot>
       </table>
     </div>
   {% else %}
-    <p class="td-muted">{% trans 'No products or quotas have been set up yet.' %}</p>
+    <p class="td-muted">{% trans 'No quotas have been set up yet.' %}</p>
   {% endif %}
 </section>

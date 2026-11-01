@@ -532,13 +532,13 @@ def get_dashboard_sales_context(request, subevent, can_view_orders):
     if not can_view_orders:
         return None
 
-    def orders_url(product_id=None, status=None):
+    def orders_url(product_id=None, status=None, include_subevent=True):
         url = reverse(
             'control:event.orders',
             kwargs={'organizer': event.organizer.slug, 'event': event.slug},
         )
         params = []
-        if subevent:
+        if subevent and include_subevent:
             params.append(f'subevent={subevent.pk}')
         if product_id is not None:
             params.append(f'product={product_id}')
@@ -574,9 +574,13 @@ def get_dashboard_sales_context(request, subevent, can_view_orders):
             qa.compute()
 
         rows = []
-        total_ordered = total_paid = total_pending = total_remaining = total_capacity = 0
-        any_unlimited_capacity = False
-        any_unlimited_remaining = False
+        # Collect the union of products/variations across the shown quotas so
+        # the totals can be computed over DISTINCT order positions. Summing the
+        # per-quota rows would double-count any product that is in more than one
+        # quota, and capacity/remaining cannot be added meaningfully across
+        # overlapping quotas at all.
+        all_product_ids = set()
+        all_variation_ids = set()
 
         for q in quotas:
             paid = qa.count_paid_orders.get(q, 0)
@@ -607,9 +611,13 @@ def get_dashboard_sales_context(request, subevent, can_view_orders):
                 else None
             )
             if single_product is not None:
-                ordered_url = orders_url(product_id=single_product.pk)
-                paid_url = orders_url(product_id=single_product.pk, status='p')
-                pending_url = orders_url(product_id=single_product.pk, status='n')
+                # Event-level quotas (subevent=None) count null-subevent
+                # positions, which a date-filtered order list would exclude, so
+                # omit the date filter for those rows to match the shown count.
+                include_se = q.subevent_id is not None
+                ordered_url = orders_url(product_id=single_product.pk, include_subevent=include_se)
+                paid_url = orders_url(product_id=single_product.pk, status='p', include_subevent=include_se)
+                pending_url = orders_url(product_id=single_product.pk, status='n', include_subevent=include_se)
             else:
                 ordered_url = paid_url = pending_url = quota_url
 
@@ -635,27 +643,33 @@ def get_dashboard_sales_context(request, subevent, can_view_orders):
                 }
             )
 
-            total_ordered += ordered
-            total_paid += paid
-            total_pending += pending
-            if left is None:
-                any_unlimited_remaining = True
-            else:
-                total_remaining += left
-            if q.size is None:
-                any_unlimited_capacity = True
-            else:
-                total_capacity += q.size
+            all_product_ids.update(p.pk for p in q.prefetched_products)
+            all_variation_ids.update(v.pk for v in q.prefetched_variations)
+
+        # Totals over DISTINCT positions (a product may be in several quotas).
+        # Capacity and remaining are intentionally omitted ('n/a'): they cannot
+        # be summed across overlapping quotas without overstating the event.
+        total_paid = total_pending = 0
+        if all_product_ids or all_variation_ids:
+            positions = OrderPosition.objects.filter(order__event=event)
+            if subevent:
+                positions = positions.filter(Q(subevent=subevent) | Q(subevent__isnull=True))
+            positions = positions.filter(
+                Q(product_id__in=all_product_ids) | Q(variation_id__in=all_variation_ids)
+            )
+            total_paid = positions.filter(order__status=Order.STATUS_PAID).count()
+            total_pending = positions.filter(order__status=Order.STATUS_PENDING).count()
 
     return {
         'rows': rows,
         'has_quotas': bool(rows),
         'totals': {
-            'ordered': total_ordered,
+            'ordered': total_paid + total_pending,
             'paid': total_paid,
             'pending': total_pending,
-            'remaining': None if any_unlimited_remaining else total_remaining,
-            'capacity': None if any_unlimited_capacity else total_capacity,
+            # Not summable across overlapping quotas.
+            'remaining': 'n/a',
+            'capacity': 'n/a',
         },
     }
 

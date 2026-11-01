@@ -506,6 +506,160 @@ def get_dashboard_kpi_context(request, subevent, can_view_orders, can_change_eve
     }
 
 
+def get_dashboard_sales_context(request, subevent, can_view_orders):
+    """Build the "Sales and capacity" table data for the tickets dashboard.
+
+    One row per quota (quotas carry the capacity and availability), showing the
+    quota's products, ordered/paid/pending counts, remaining availability,
+    capacity and a status. All numbers come from a single ``QuotaAvailability``
+    computation (``full_results=True``) so we reuse the canonical quota maths
+    instead of recomputing it. ``full_results`` cannot be combined with
+    ``allow_cache``, so this computes fresh.
+
+    Status maps the ``Quota.AVAILABILITY_*`` result (and ``closed``) the same way
+    as ``pretixcontrol/items/fragment_quota_availability.html``:
+
+    * closed -> disabled (grey)
+    * AVAILABILITY_OK -> on sale (green)
+    * AVAILABILITY_RESERVED -> limited (orange)
+    * AVAILABILITY_ORDERED -> sold out, pending orders (orange)
+    * AVAILABILITY_GONE -> sold out (red)
+
+    Returns ``None`` when the user may not view orders (so the template skips the
+    section) and sets ``has_quotas`` False for a meaningful empty state.
+    """
+    event = request.event
+    if not can_view_orders:
+        return None
+
+    def orders_url(product_id=None, status=None):
+        url = reverse(
+            'control:event.orders',
+            kwargs={'organizer': event.organizer.slug, 'event': event.slug},
+        )
+        params = []
+        if subevent:
+            params.append(f'subevent={subevent.pk}')
+        if product_id is not None:
+            params.append(f'product={product_id}')
+        if status is not None:
+            params.append(f'status={status}')
+        return url + ('?' + '&'.join(params) if params else '')
+
+    with scope(event=event):
+        # Quotas are per-date; only filter by the selected date when one is
+        # chosen. Event-level quotas (subevent=None) apply to every date, so
+        # include them alongside the selected date's quotas (matching how
+        # QuotaAvailability and the check-in lists treat subevent=None).
+        quotas_qs = event.quotas.all()
+        if subevent:
+            quotas_qs = quotas_qs.filter(Q(subevent=subevent) | Q(subevent__isnull=True))
+        # Annotate variation counts so we never query has_variations per product.
+        quotas = list(
+            quotas_qs.prefetch_related(
+                Prefetch(
+                    'products',
+                    queryset=Product.objects.annotate(variation_count=Count('variations')),
+                ),
+                Prefetch('variations', queryset=ProductVariation.objects.select_related('product')),
+            )
+        )
+        for q in quotas:
+            q.prefetched_products = list(q.products.all())
+            q.prefetched_variations = list(q.variations.all())
+
+        qa = QuotaAvailability(full_results=True)
+        if quotas:
+            qa.queue(*quotas)
+            qa.compute()
+
+        rows = []
+        total_ordered = total_paid = total_pending = total_remaining = total_capacity = 0
+        any_unlimited_capacity = False
+        any_unlimited_remaining = False
+
+        for q in quotas:
+            paid = qa.count_paid_orders.get(q, 0)
+            pending = qa.count_pending_orders.get(q, 0)
+            ordered = paid + pending
+            status_code, left = qa.results.get(q, (Quota.AVAILABILITY_OK, None))
+
+            if q.closed:
+                status_key, status_label, status_dot = 'disabled', _('Disabled'), 'td-dot-neutral'
+            elif status_code == Quota.AVAILABILITY_OK:
+                status_key, status_label, status_dot = 'on_sale', _('On sale'), 'td-dot-success'
+            elif status_code == Quota.AVAILABILITY_RESERVED:
+                status_key, status_label, status_dot = 'limited', _('Limited'), 'td-dot-warning'
+            elif status_code == Quota.AVAILABILITY_ORDERED:
+                status_key, status_label, status_dot = 'pending', _('Sold out (pending orders)'), 'td-dot-warning'
+            else:  # AVAILABILITY_GONE
+                status_key, status_label, status_dot = 'sold_out', _('Sold out'), 'td-dot-danger'
+
+            # Single-product quotas can link counts to the filtered order list;
+            # otherwise point at the quota detail, which breaks down its orders.
+            quota_url = reverse(
+                'control:event.products.quotas.show',
+                kwargs={'organizer': event.organizer.slug, 'event': event.slug, 'quota': q.pk},
+            )
+            single_product = (
+                q.prefetched_products[0]
+                if len(q.prefetched_products) == 1 and not q.prefetched_variations
+                else None
+            )
+            if single_product is not None:
+                ordered_url = orders_url(product_id=single_product.pk)
+                paid_url = orders_url(product_id=single_product.pk, status='p')
+                pending_url = orders_url(product_id=single_product.pk, status='n')
+            else:
+                ordered_url = paid_url = pending_url = quota_url
+
+            product_names = [str(p) for p in q.prefetched_products if not p.variation_count]
+            product_names += [f'{v.product} – {v}' for v in q.prefetched_variations]
+
+            rows.append(
+                {
+                    'name': q.name,
+                    'products': product_names,
+                    'ordered': ordered,
+                    'paid': paid,
+                    'pending': pending,
+                    'remaining': left,  # None means unlimited
+                    'capacity': q.size,  # None means unlimited
+                    'status_key': status_key,
+                    'status_label': status_label,
+                    'status_dot': status_dot,
+                    'quota_url': quota_url,
+                    'ordered_url': ordered_url,
+                    'paid_url': paid_url,
+                    'pending_url': pending_url,
+                }
+            )
+
+            total_ordered += ordered
+            total_paid += paid
+            total_pending += pending
+            if left is None:
+                any_unlimited_remaining = True
+            else:
+                total_remaining += left
+            if q.size is None:
+                any_unlimited_capacity = True
+            else:
+                total_capacity += q.size
+
+    return {
+        'rows': rows,
+        'has_quotas': bool(rows),
+        'totals': {
+            'ordered': total_ordered,
+            'paid': total_paid,
+            'pending': total_pending,
+            'remaining': None if any_unlimited_remaining else total_remaining,
+            'capacity': None if any_unlimited_capacity else total_capacity,
+        },
+    }
+
+
 def event_index(request, organizer, event):
     subevent = None
     if request.GET.get('subevent', '') != '' and request.event.has_subevents:
@@ -581,6 +735,8 @@ def event_index(request, organizer, event):
     ctx['at_a_glance'] = get_dashboard_kpi_context(
         request, subevent, can_view_orders, can_change_event_settings
     )
+
+    ctx['sales_capacity'] = get_dashboard_sales_context(request, subevent, can_view_orders)
 
     ctx['has_overpaid_orders'] = (
         can_view_orders
